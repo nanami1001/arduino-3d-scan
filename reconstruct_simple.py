@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-強化版 Visual Hull 3D 重建器
-✔ 100% 防止 IndexError
-✔ 投影誤差降低（使用 round + double boundary check）
-✔ silhouette 穩定、乾淨
-✔ 可直接被 build_ply.py 呼叫
+reconstruct_simple.py 的 Open3D 強化版
+-------------------------------------
+
+功能：
+✔ 完整 Visual Hull 3D 重建
+✔ 完整防止 IndexError
+✔ silhouette 自動清理 + 自動反轉亮背景
+✔ 投影誤差修正（round + double boundary）
+✔ 可由 build_ply.py 呼叫
+✔ 使用 Open3D 顯示互動式 3D 點雲視窗（可旋轉、縮放、移動）
+✔ 支援 --no-display（禁用顯示）
 """
 
 import cv2
@@ -12,6 +18,13 @@ import numpy as np
 from pathlib import Path
 import argparse
 import matplotlib.pyplot as plt
+
+# 嘗試使用 tqdm 進度條
+try:
+    from tqdm import trange
+    USE_TQDM = True
+except:
+    USE_TQDM = False
 
 
 # =====================================================
@@ -23,8 +36,11 @@ def load_images(folder="scan_images", num_images=8):
         path = Path(folder) / f"{i:02d}.png"
         if path.exists():
             img = cv2.imread(str(path))
-            images.append(img)
-            print(f"✓ 已載入: {path.name}")
+            if img is not None:
+                print(f"✓ 已載入: {path.name}")
+                images.append(img)
+            else:
+                print(f"✗ 無法讀取影像（cv2.imread 返回 None）：{path}")
         else:
             print(f"✗ 找不到影像: {path}")
     return images
@@ -39,11 +55,11 @@ def extract_silhouette(img):
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 背景太亮 → 自動翻轉
+    # 背景太亮 → 自動反轉
     if np.mean(th == 255) > 0.5:
         th = 255 - th
 
-    # 清雜訊
+    # 雜訊處理
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
     th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=2)
@@ -54,41 +70,50 @@ def extract_silhouette(img):
 # =====================================================
 # 相機 Look-at Matrix
 # =====================================================
-def camera_lookat_matrix(cam_pos, target=np.array([0, 0, 0])):
-    forward = target - cam_pos
-    forward = forward / np.linalg.norm(forward)
+def camera_lookat_matrix(cam_pos, target=np.array([0.0, 0.0, 0.0])):
+    cam_pos = np.asarray(cam_pos, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
 
-    up = np.array([0, 1, 0])
+    forward = target - cam_pos
+    n = np.linalg.norm(forward)
+    if n < 1e-8:
+        forward = np.array([0.0, 0.0, 1.0])
+    else:
+        forward = forward / n
+
+    up = np.array([0.0, 1.0, 0.0])
+    if abs(np.dot(forward, up)) > 0.999:
+        up = np.array([0.0, 0.0, 1.0])
+
     right = np.cross(forward, up)
-    right = right / np.linalg.norm(right)
+    right /= np.linalg.norm(right)
 
     up = np.cross(right, forward)
-    return np.vstack([right, up, forward]).T
+
+    return np.column_stack((right, up, forward))
 
 
 # =====================================================
-# 投影 → 加強防越界
+# 投影（雙層邊界保護）
 # =====================================================
 def project_point(P, cam_pos, R, K, W, H):
-
+    P = np.asarray(P, dtype=np.float64)
     Pw = P - cam_pos
 
     Pc = np.array([
         np.dot(R[:, 0], Pw),
         np.dot(R[:, 1], Pw),
         np.dot(R[:, 2], Pw)
-    ])
+    ], dtype=np.float64)
 
     if Pc[2] <= 1e-6:
         return None
 
     proj = K @ (Pc / Pc[2])
 
-    # 先 round 再檢查
-    u = int(round(proj[0]))
-    v = int(round(proj[1]))
+    u = int(round(float(proj[0])))
+    v = int(round(float(proj[1])))
 
-    # 第一層防越界（投影後檢查）
     if not (0 <= u < W and 0 <= v < H):
         return None
 
@@ -96,10 +121,9 @@ def project_point(P, cam_pos, R, K, W, H):
 
 
 # =====================================================
-# Visual Hull Carving（完全防越界版）
+# Visual Hull carving
 # =====================================================
 def voxel_carve(images, grid=40):
-
     H, W = images[0].shape[:2]
     silhouettes = [extract_silhouette(img) for img in images]
     N = len(images)
@@ -107,16 +131,15 @@ def voxel_carve(images, grid=40):
     coords = np.linspace(-1, 1, grid)
     voxel = np.ones((grid, grid, grid), dtype=np.uint8)
 
-    # Camera Intrinsic
     fx = fy = W * 1.2
     cx, cy = W / 2, H / 2
     K = np.array([[fx, 0, cx],
                   [0, fy, cy],
                   [0, 0, 1]])
 
-    # Camera 旋轉
     angles = np.linspace(0, 2 * np.pi, N, endpoint=False)
     radius = 2.5
+
     cam_pos_list = [np.array([radius * np.cos(a), 0, radius * np.sin(a)]) for a in angles]
     R_list = [camera_lookat_matrix(cp) for cp in cam_pos_list]
 
@@ -125,8 +148,14 @@ def voxel_carve(images, grid=40):
     removed = 0
     total = grid * grid * grid
 
-    for ix, x in enumerate(coords):
-        print(f"slice {ix}/{grid}", end="\r")
+    outer_range = trange(grid, desc="slice") if USE_TQDM else range(grid)
+
+    for ix in outer_range:
+        if not USE_TQDM:
+            print(f"slice {ix+1}/{grid}", end="\r")
+
+        x = coords[ix]
+
         for iy, y in enumerate(coords):
             for iz, z in enumerate(coords):
 
@@ -137,7 +166,6 @@ def voxel_carve(images, grid=40):
                 keep = True
 
                 for i in range(N):
-
                     proj = project_point(P, cam_pos_list[i], R_list[i], K, W, H)
 
                     if proj is None:
@@ -146,12 +174,11 @@ def voxel_carve(images, grid=40):
 
                     u, v = proj
 
-                    # ⭐ 完全防越界（第二層保護）
-                    if v < 0 or v >= silhouettes[i].shape[0] or u < 0 or u >= silhouettes[i].shape[1]:
+                    # 二次越界防護
+                    if u < 0 or u >= W or v < 0 or v >= H:
                         keep = False
                         break
 
-                    # 真正 silhouette 判斷
                     if silhouettes[i][v, u] == 0:
                         keep = False
                         break
@@ -179,10 +206,35 @@ def voxel_to_pointcloud(voxel, grid=40):
 
 
 # =====================================================
-# export PLY
+# Open3D 點雲視覺化
+# =====================================================
+def visualize(points):
+    try:
+        import open3d as o3d
+    except ImportError:
+        print("⚠️ 未安裝 open3d，無法使用 3D 視窗。請執行： pip install open3d")
+        return
+
+    if len(points) == 0:
+        print("⚠️ 無點雲可顯示")
+        return
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # 白色點雲
+    colors = np.ones((points.shape[0], 3))
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    o3d.visualization.draw_geometries([pcd], window_name="Visual Hull 3D Viewer")
+
+
+# =====================================================
+# PLY 輸出
 # =====================================================
 def save_ply(points, out_path):
     out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         f.write("ply\nformat ascii 1.0\n")
         f.write(f"element vertex {len(points)}\n")
@@ -200,15 +252,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--grid_size", type=int, default=40)
     parser.add_argument("--num_images", type=int, default=8)
-    parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--images_folder", default="scan_images")
     parser.add_argument("--output", default="scan_images/result_visual_hull.ply")
+    parser.add_argument("--no-display", action="store_true")
+
     args = parser.parse_args()
 
     print("=============================================")
     print("🔧 Visual Hull 重建開始")
     print("=============================================\n")
 
-    images = load_images(num_images=args.num_images)
+    images = load_images(folder=args.images_folder, num_images=args.num_images)
     if not images:
         print("❌ 無法載入影像")
         return
