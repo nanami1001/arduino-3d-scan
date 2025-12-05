@@ -2,16 +2,21 @@
 """
 簡單 PLY 檢視器（純程式讀取與繪製）
 用法:
+    python view_ply.py [PLY_path] [--rebuild]
+例如:
     python view_ply.py scan_images/result_visual_hull.ply
+    python view_ply.py --rebuild
 如果不提供檔案，預設會載入 scan_images/result_visual_hull.ply
+若檔案不存在會自動呼叫 build_ply.py 進行重建。
 """
 import sys
-import subprocess
 import numpy as np
 from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from pathlib import Path
+
+from build_ply import ensure_ply_exists
 
 
 def load_ply_ascii(path):
@@ -101,19 +106,15 @@ def main():
     # 支援強制重建旗標
     force_rebuild = '--rebuild' in sys.argv
 
-    # 若檔案不存在或要求重建，呼叫 reconstruct_simple.py 來產生 PLY
-    if (not path.exists()) or force_rebuild:
-        print(f"PLY 檔 {path} 不存在或要求重建 -> 開始執行重建腳本...")
-        try:
-            # 使用相同的 Python 執行環境執行重建腳本
-            subprocess.run([sys.executable, 'reconstruct_simple.py'], check=True)
-        except subprocess.CalledProcessError as e:
-            print("重建腳本失敗：", e)
-            return
+    # 呼叫 build_ply 確保 PLY 存在
+    ply_path = ensure_ply_exists(str(path), force_rebuild=force_rebuild)
+    if not ply_path:
+        print("無法取得 PLY 檔案，程式終止。")
+        return
 
     try:
-        pts = load_ply_ascii(str(path))
-        print(f'Loaded {len(pts)} points from {path}')
+        pts = load_ply_ascii(str(ply_path))
+        print(f'Loaded {len(pts)} points from {ply_path}')
         visualize(pts)
     except Exception as e:
         print('Error loading PLY:', e)
