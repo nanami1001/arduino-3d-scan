@@ -24,6 +24,7 @@ from pathlib import Path
 from datetime import datetime
 import os
 import time
+import subprocess
 
 # 數值、繪圖、科學運算
 import numpy as np
@@ -36,6 +37,8 @@ from scipy.spatial import ConvexHull
 
 # 重建系統模組（自動生成 PLY）
 from build_ply import ensure_ply_exists
+# ESP32 攝影機模組整合（延遲載入以避免啟動時阻塞）
+import importlib
 
 
 # ============================================================
@@ -57,272 +60,8 @@ PENDING = "○"
 LOADING = "⟳"
 
 
-# ============================================================
-#  CheckItem — 檢查清單項目資料結構
-# ============================================================
-
-class CheckItem:
-    """
-    檢查項目的資料結構：
-    ▪ title: 主標題（功能名稱）
-    ▪ description: 副標題（說明）
-    ▪ status: pending / loading / success / failed
-    ▪ timestamp: 更新時間
-    """
-
-    def __init__(self, title, description=""):
-        self.title = title
-        self.description = description
-        self.status = "pending"
-        self.timestamp = None
-        self.details = ""
-
-    def set_status(self, status, details=""):
-        """更新狀態並記錄詳細描述"""
-        self.status = status
-        self.timestamp = datetime.now().strftime("%H:%M:%S")
-        self.details = details
-
-    def get_icon(self):
-        """依狀態回傳 UI 圖示"""
-        return {
-            "success": CHECKMARK,
-            "failed": CROSS,
-            "loading": LOADING,
-            "pending": PENDING,
-        }.get(self.status, PENDING)
-
-    def get_color(self):
-        """依狀態回傳顏色"""
-        return {
-            "success": COLOR_GREEN,
-            "failed": COLOR_RED,
-            "loading": COLOR_BLUE,
-            "pending": COLOR_GRAY,
-        }.get(self.status, COLOR_GRAY)
-
-
-# ============================================================
-#  ChecklistFrame — 檢查清單介面
-# ============================================================
-
-class ChecklistFrame(ttk.Frame):
-    """
-    檢查清單視覺化 UI：
-    ▪ 硬體偵測
-    ▪ Serial 連線
-    ▪ WiFi 連線
-    ▪ 轉盤校準
-    ▪ 影像擷取
-    ▪ 影像處理
-    ▪ 重建（Visual Hull）
-    ▪ 匯出結果
-    ▪ 視覺化
-
-    支援狀態動畫（loading 狀態會旋轉）
-    """
-
-    def __init__(self, root, **kwargs):
-        super().__init__(root, **kwargs)
-        self.root = root
-        self.items = []
-        self.item_widgets = {}
-        self.is_animating = {}
-
-        self._create_header()
-        self._create_checklist()
-        self._create_buttons()
-
-    # -------------------------------
-    #  Header 區域
-    # -------------------------------
-
-    def _create_header(self):
-        header = ttk.Frame(self, height=60)
-        header.pack(fill=tk.X, padx=15, pady=10)
-
-        ttk.Label(header, text="Arduino 3D 掃描系統檢查清單",
-                  font=("Arial", 16, "bold")).pack(anchor=tk.W)
-
-        ttk.Label(header, text="硬體配置 • 擷取進度 • 重建結果",
-                  font=("Arial", 10), foreground=COLOR_LIGHT_TEXT).pack(anchor=tk.W)
-
-    # -------------------------------
-    #  檢查清單列表（Scrollable）
-    # -------------------------------
-
-    def _create_checklist(self):
-        canvas_frame = ttk.Frame(self)
-        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        canvas = tk.Canvas(canvas_frame, bg=COLOR_BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.checklist_frame = scrollable_frame
-        self._add_default_items()
-
-    # -------------------------------
-    #  預設檢查項目
-    # -------------------------------
-
-    def _add_default_items(self):
-        default_items = [
-            CheckItem("硬體偵測", "檢查 Arduino 和 ESP32-CAM 連接"),
-            CheckItem("Serial 口配置", "COM 埠: COM3 (115200 波特率)"),
-            CheckItem("WiFi 連線", "ESP32-CAM IP: 192.168.1.100"),
-            CheckItem("轉盤校準", "初始化步進馬達和轉盤"),
-            CheckItem("影像擷取", "旋轉→擷取→儲存 (0/36 完成)"),
-            CheckItem("影像處理", "二值化 → 矽脫圖像"),
-            CheckItem("體素雕刻", "3D 重建中..."),
-            CheckItem("結果匯出", "PLY 檔案生成"),
-            CheckItem("視覺化", "3D 點雲顯示 + 邊界網格"),
-        ]
-
-        for item in default_items:
-            self.add_item(item)
-
-    # -------------------------------
-    #  新增 UI 項目
-    # -------------------------------
-
-    def add_item(self, check_item):
-        frame = tk.Frame(self.checklist_frame, bg=COLOR_BG)
-        frame.pack(fill=tk.X, pady=8, padx=5)
-
-        # 狀態標籤
-        status_label = tk.Label(
-            frame, text=check_item.get_icon(),
-            bg=COLOR_BG, fg=check_item.get_color(),
-            font=("Arial", 14, "bold"), width=3
-        )
-        status_label.pack(side=tk.LEFT, padx=10)
-
-        # 文本
-        text_frame = tk.Frame(frame, bg=COLOR_BG)
-        text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        title = tk.Label(
-            text_frame, text=check_item.title,
-            bg=COLOR_BG, fg=COLOR_TEXT,
-            font=("Arial", 11, "bold")
-        )
-        title.pack(anchor=tk.W)
-
-        detail = tk.Label(
-            text_frame, text=check_item.description,
-            bg=COLOR_BG, fg=COLOR_LIGHT_TEXT,
-            font=("Arial", 9)
-        )
-        detail.pack(anchor=tk.W)
-
-        # 儲存參考
-        idx = len(self.items)
-        self.items.append(check_item)
-        self.item_widgets[idx] = {
-            "frame": frame,
-            "status_label": status_label,
-            "title_label": title,
-            "detail_label": detail
-        }
-        self.is_animating[idx] = False
-
-    # -------------------------------
-    #  更新項目狀態
-    # -------------------------------
-
-    def update_item(self, index, status, description=""):
-        if index >= len(self.items):
-            return
-
-        item = self.items[index]
-        item.set_status(status, description)
-
-        widgets = self.item_widgets[index]
-        widgets["status_label"].config(text=item.get_icon(), fg=item.get_color())
-        widgets["detail_label"].config(text=description)
-
-        # loading → 啟動動畫
-        if status == "loading":
-            self._animate_loading(index)
-
-    # -------------------------------
-    #  loading 圖示動畫（⟳）
-    # -------------------------------
-
-    def _animate_loading(self, index):
-        if self.is_animating[index]:
-            return
-
-        self.is_animating[index] = True
-        symbols = ["⟳", "↻", "⟲"]
-        idx = [0]
-        label = self.item_widgets[index]["status_label"]
-
-        def animate():
-            if label.winfo_exists() and self.items[index].status == "loading":
-                label.config(text=symbols[idx[0] % 3])
-                idx[0] += 1
-                self.root.after(500, animate)
-            else:
-                self.is_animating[index] = False
-
-        animate()
-
-    # -------------------------------
-    #  底部操作按鈕
-    # -------------------------------
-
-    def _create_buttons(self):
-        frame = ttk.Frame(self)
-        frame.pack(fill=tk.X, padx=10, pady=10)
-
-        ttk.Button(frame, text="▶ 開始掃描",
-                   command=self._on_start_scan).pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(frame, text="⏹ 停止",
-                   command=self._on_stop_scan).pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(frame, text="↻ 重設",
-                   command=self._on_reset).pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(frame, text="💾 匯出結果",
-                   command=self._on_export).pack(side=tk.RIGHT, padx=5)
-
-    # -------------------------------
-    #  項目按鈕回調事件
-    # -------------------------------
-
-    def _on_start_scan(self):
-        """模擬掃描流程：更新前兩個項目"""
-        self.update_item(0, "loading", "正在檢查硬體...")
-        self.root.after(1000, lambda: self.update_item(0, "success", "Arduino 已連接"))
-        self.root.after(1500, lambda: self.update_item(1, "success", "Serial 配置完成"))
-
-    def _on_stop_scan(self):
-        messagebox.showwarning("停止", "掃描已中止")
-
-    def _on_reset(self):
-        """全部恢復 pending"""
-        for i in range(len(self.items)):
-            self.items[i].status = "pending"
-            widgets = self.item_widgets[i]
-            widgets["status_label"].config(text=PENDING, fg=COLOR_GRAY)
-            widgets["detail_label"].config(text=self.items[i].description)
-
-    def _on_export(self):
-        messagebox.showinfo("匯出", "結果已匯出至 scan_images/result.ply")
+# Checklist functionality removed per updated requirements.
+# All checklist UI, data structures and related flows have been removed.
 
 
 # ============================================================
@@ -398,6 +137,7 @@ def load_ply_ascii(path):
 
 # ============================================================
 #  Main UI — 主介面與事件邏輯
+#  新增：啟動模式選擇（A: 使用現有樣本；B: 從 ESP32-CAM 採集）
 # ============================================================
 
 class MainUI:
@@ -422,10 +162,10 @@ class MainUI:
         self._create_rebuild_tab()
 
         # Tab 2 — 檢查清單
-        self.tab_checklist = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_checklist, text="✓ 檢查清單")
-        self.checklist_frame = ChecklistFrame(self.tab_checklist)
-        self.checklist_frame.pack(fill="both", expand=True)
+        # (Checklist removed per new requirements)
+
+        # 啟動時顯示模式選擇（延後到主迴圈以確保視窗已初始化）
+        self.root.after(100, self.show_mode_selection)
 
     # ============================================================
     #  Tab 1 — 3D 重建（參數、按鈕、3D 顯示、日誌）
@@ -542,36 +282,41 @@ class MainUI:
         self.is_building = True
         self.rebuild_btn.config(state="disabled")
 
-        # 更新檢查清單（體素雕刻項目）
-        self.checklist_frame.update_item(6, "loading", "正在執行 Visual Hull 演算法...")
+        # 更新狀態：體素雕刻開始
+        self.log_insert("⟳ 正在執行 Visual Hull 演算法...")
 
         # -------------------------
         # 背景執行
         # -------------------------
 
+        # 選擇來源資料夾（dataset）
+        images_folder = self._ask_dataset_folder()
+        if images_folder is None:
+            self.log_insert("✗ 使用者取消資料夾選擇，重建中止")
+            self.is_building = False
+            self.rebuild_btn.config(state="normal")
+            return
+
         def worker():
             try:
+                # 將輸出 PLY 放在選擇的資料夾內
+                out_ply = Path(images_folder) / "result_visual_hull.ply"
                 ply_path = ensure_ply_exists(
-                    str(self.ply_path),
+                    str(out_ply),
                     force_rebuild=force,
                     grid_size=grid,
                     num_images=num_images,
-                    no_display=True
+                    no_display=True,
+                    images_folder=images_folder,
                 )
 
                 if ply_path:
                     self.root.after(50, lambda: self.on_rebuild_complete(str(ply_path)))
                 else:
                     self.root.after(50, lambda: self.log_insert("✗ PLY 生成失敗"))
-                    self.root.after(50, lambda:
-                        self.checklist_frame.update_item(6, "failed", "Visual Hull 演算失敗")
-                    )
 
             except Exception as e:
                 self.root.after(50, lambda: self.log_insert(f"✗ 錯誤：{e}"))
-                self.root.after(50, lambda:
-                    self.checklist_frame.update_item(6, "failed", f"錯誤：{e}")
-                )
 
             finally:
                 self.is_building = False
@@ -579,15 +324,20 @@ class MainUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _ask_dataset_folder(self):
+        folder = filedialog.askdirectory(initialdir=str(Path("scan_images")), title="選擇資料夾作為資料來源")
+        if not folder:
+            return None
+        return folder
+
     # ============================================================
     #  重建完成後 → 載入 PLY
     # ============================================================
 
     def on_rebuild_complete(self, ply_path):
         self.log_insert("✓ 重建完成，正在載入 PLY...")
-        self.checklist_frame.update_item(6, "success", "Visual Hull 完成")
-        self.checklist_frame.update_item(7, "success", "PLY 已生成")
-        self.checklist_frame.update_item(8, "loading", "正在載入 3D 點雲...")
+        self.log_insert("✓ Visual Hull 完成，PLY 已生成")
+        self.log_insert("⟳ 正在載入 3D 點雲...")
 
         self.load_and_display_ply(ply_path)
 
@@ -596,26 +346,47 @@ class MainUI:
     # ============================================================
 
     def on_view(self):
-        path = filedialog.askopenfilename(
-            initialdir=str(Path("scan_images")),
-            title="選擇 PLY 檔案",
-            filetypes=[("PLY files", "*.ply"), ("All files", "*.*")]
-        )
+        # 選擇來源資料夾（dataset）後載入或重建其 PLY
+        folder = filedialog.askdirectory(initialdir=str(Path("scan_images")), title="選擇資料夾作為資料來源")
+        if not folder:
+            self.log_insert("✗ 使用者取消資料夾選擇")
+            return
 
-        if not path:
-            path = str(self.ply_path)
-            if not Path(path).exists():
-                resp = messagebox.askyesno(
-                    "找不到 PLY",
-                    f"找不到 {path}\n是否要立即建立 PLY？"
-                )
-                if resp:
-                    self.on_rebuild()
-                else:
-                    self.log_insert("✗ 使用者取消")
-                return
+        ply_path = Path(folder) / "result_visual_hull.ply"
+        if ply_path.exists():
+            self.load_and_display_ply(str(ply_path))
+            return
 
-        self.load_and_display_ply(path)
+        resp = messagebox.askyesno("找不到 PLY", f"在所選資料夾未找到 PLY：{ply_path}\n是否要基於該資料夾立即建立 PLY？")
+        if resp:
+            # 啟動重建流程，使用該資料夾作為來源
+            self.log_insert(f"開始為資料夾建立 PLY：{folder}")
+            self.is_building = True
+            self.rebuild_btn.config(state="disabled")
+
+            def worker_build():
+                try:
+                    result = ensure_ply_exists(
+                        str(ply_path),
+                        force_rebuild=False,
+                        grid_size=self.grid_size_var.get(),
+                        num_images=self.num_images_var.get(),
+                        no_display=True,
+                        images_folder=folder,
+                    )
+
+                    if result:
+                        self.root.after(50, lambda: self.load_and_display_ply(str(result)))
+                    else:
+                        self.root.after(50, lambda: self.log_insert("✗ PLY 建立失敗"))
+
+                finally:
+                    self.is_building = False
+                    self.root.after(50, lambda: self.rebuild_btn.config(state="normal"))
+
+            threading.Thread(target=worker_build, daemon=True).start()
+        else:
+            self.log_insert("✗ 使用者取消")
 
     # ============================================================
     #  載入 + 顯示 PLY（含自動重建 fallback）
@@ -667,11 +438,11 @@ class MainUI:
             pts = load_ply_ascii(str(path))
             self.log_insert(f"✓ PLY 載入成功：{len(pts)} 點")
             self.display_points(pts)
-            self.checklist_frame.update_item(8, "success", f"3D 點雲已顯示（{len(pts)} 點）")
+            self.log_insert(f"✓ 3D 點雲已顯示（{len(pts)} 點）")
 
         except Exception as e:
             self.log_insert(f"✗ 讀取 PLY 失敗：{e}")
-            self.checklist_frame.update_item(8, "failed", f"視覺化失敗：{e}")
+            self.log_insert(f"✗ 視覺化失敗：{e}")
 
     # ============================================================
     #  顯示 3D 點雲（含 ConvexHull）
@@ -736,6 +507,117 @@ class MainUI:
         ax.set_zlim3d(mid[2] - r, mid[2] + r)
 
     # ============================================================
+    #  啟動模式選擇與流程控制
+    # ============================================================
+
+    def show_mode_selection(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("選擇操作模式")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry("420x160")
+
+        ttk.Label(dlg, text="請選擇系統操作模式：", font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 6))
+        ttk.Label(dlg, text="A. 使用現有樣本產生 3D 影像（直接進入預覽模式）\nB. 使用影像採集設備從頭開始（清空資料並啟動採集）",
+                  foreground=COLOR_LIGHT_TEXT).pack(anchor=tk.W, padx=12)
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=12)
+
+        ttk.Button(btn_frame, text="A: 使用現有樣本", command=lambda: (dlg.destroy(), self._mode_a())).pack(side=tk.LEFT, padx=12)
+        ttk.Button(btn_frame, text="B: 從影像採集開始", command=lambda: (dlg.destroy(), self._mode_b())).pack(side=tk.RIGHT, padx=12)
+
+    def _mode_a(self):
+        self.log_insert("模式 A：使用現有樣本 → 直接進入預覽模式")
+
+    def _mode_b(self):
+        self.log_insert("模式 B：從影像採集設備開始（保留既有資料）")
+
+        ok = self._hardware_check_dialog()
+        if not ok:
+            self.log_insert("✗ 使用者取消硬體檢查")
+            return
+
+        self.log_insert("啟動 ESP32-CAM 採集器（獨立視窗）。採集資料將儲存在使用者選擇或建立的新資料夾中。")
+        try:
+            script = Path("esp32_cam_capture.py").resolve()
+            subprocess.Popen([sys.executable, str(script)])
+        except Exception as e:
+            messagebox.showerror("啟動失敗", f"無法啟動 esp32_cam_capture：{e}")
+            return
+
+        threading.Thread(target=self._monitor_capture_completion, daemon=True).start()
+
+    def _clear_scan_images(self):
+        folder = Path("scan_images")
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+            return
+
+        for p in folder.iterdir():
+            try:
+                if p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    import shutil
+                    shutil.rmtree(p)
+            except Exception as e:
+                raise RuntimeError(f"刪除 {p} 失敗：{e}") from e
+
+    def _hardware_check_dialog(self) -> bool:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("硬體檢查")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry("520x260")
+
+        ttk.Label(dlg, text="請確認以下硬體與連線已完成：", font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 6))
+
+        checks = [
+            "ESP32-CAM 已正確安裝並固定",
+            "電源與網路連線已接好",
+            "轉盤與固定結構已完成安裝",
+            "相機視角與對位已確認",
+        ]
+
+        for c in checks:
+            ttk.Label(dlg, text=f"• {c}", foreground=COLOR_TEXT).pack(anchor=tk.W, padx=18, pady=4)
+
+        result = {"ok": False}
+
+        def on_ok():
+            result["ok"] = True
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=12)
+        ttk.Button(btn_frame, text="我已完成硬體檢查", command=on_ok).pack(side=tk.LEFT, padx=12)
+        ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.RIGHT, padx=12)
+
+        self.root.wait_window(dlg)
+        return result["ok"]
+
+    def _monitor_capture_completion(self):
+        self.log_insert("開始監控採集結果（等待任一子資料夾下的 result_visual_hull.ply）...")
+        timeout = 60 * 30  # 最多等待 30 分鐘
+        start = time.time()
+        while time.time() - start < timeout:
+            for p in Path('.').rglob('result_visual_hull.ply'):
+                try:
+                    if p.exists() and p.stat().st_size > 0:
+                        self.root.after(50, lambda p=p: self.log_insert(f"✓ 偵測到 PLY：{p}，導入預覽模式"))
+                        self.root.after(100, lambda: self.notebook.select(self.tab_rebuild))
+                        self.root.after(150, lambda p=p: self.load_and_display_ply(str(p)))
+                        return
+                except Exception:
+                    continue
+
+            time.sleep(2)
+
+        self.root.after(50, lambda: self.log_insert("⚠ 監控逾時，未偵測到 PLY。"))
     #  開啟資料夾
     # ============================================================
 

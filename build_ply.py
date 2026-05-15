@@ -22,7 +22,7 @@ import sys          # 用來取得目前使用的 Python 可執行檔路徑
 from pathlib import Path  # 更方便管理路徑物件（比字串安全）
 
 
-def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8, no_display=True):
+def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8, no_display=True, images_folder=None):
     """
     確保指定的 PLY 檔案存在。
 
@@ -82,6 +82,13 @@ def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8,
             '--num_images', str(num_images)
         ]
 
+        # 如果使用者指定來源影像資料夾，傳遞給 reconstruct_simple.py
+        if images_folder:
+            cmd += ['--images_folder', str(images_folder)]
+
+        # 指定輸出 PLY 路徑
+        cmd += ['--output', str(ply_path)]
+
         # 如果不要顯示視窗，就加入 --no-display 參數
         if no_display:
             cmd.append('--no-display')
@@ -122,6 +129,7 @@ if __name__ == '__main__':
     # 建立 CLI （命令列介面）
     parser = argparse.ArgumentParser(description='確保 PLY 檔案存在（若需要則自動重建）')
     parser.add_argument('--ply', default='scan_images/result_visual_hull.ply', help='PLY 檔案路徑')
+    parser.add_argument('--images_folder', default='scan_images', help='來源影像資料夾')
     parser.add_argument('--rebuild', action='store_true', help='強制重建')
     parser.add_argument('--grid_size', type=int, default=40, help='網格解析度')
     parser.add_argument('--num_images', type=int, default=8, help='影像數量')
@@ -133,7 +141,8 @@ if __name__ == '__main__':
         args.ply,
         force_rebuild=args.rebuild,
         grid_size=args.grid_size,
-        num_images=args.num_images
+        num_images=args.num_images,
+        images_folder=args.images_folder
     )
 
     # 結果輸出

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import requests
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from build_ply import ensure_ply_exists
 
@@ -117,6 +117,10 @@ class CaptureApp(tk.Tk):
         self.num_photo_display_var = tk.StringVar()
         self.status_var = tk.StringVar(value="等待輸入 URL")
         self.save_dir_var = tk.StringVar(value=str(DEFAULT_SAVE_DIR))
+        # 新增：儲存資料夾選擇模式（existing / new）
+        self.folder_mode_var = tk.StringVar(value="new")
+        self.existing_folder_var = tk.StringVar(value=str(DEFAULT_SAVE_DIR))
+        self.new_folder_name_var = tk.StringVar(value="")
         self.turntable_var = tk.StringVar(value=f"轉盤速度：{TURNTABLE_PERIOD_SECONDS:.0f} 秒 / 圈")
 
         self.is_running = False
@@ -182,6 +186,26 @@ class CaptureApp(tk.Tk):
         ttk.Label(save_row, text="儲存路徑：").pack(side=tk.LEFT)
         ttk.Label(save_row, textvariable=self.save_dir_var).pack(side=tk.LEFT)
 
+        # 儲存選項：使用既有資料夾 或 建立新資料夾
+        choice_frame = ttk.LabelFrame(main, text="儲存選項")
+        choice_frame.pack(fill=tk.X, pady=(0, 10))
+
+        rb1 = ttk.Radiobutton(choice_frame, text="建立新資料夾（推薦）", variable=self.folder_mode_var, value="new", command=self._on_folder_mode_change)
+        rb1.grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
+
+        ttk.Label(choice_frame, text="資料夾名稱（空白使用預設 MM_DD_HH_MM）").grid(row=0, column=1, sticky=tk.W)
+        self.new_folder_entry = ttk.Entry(choice_frame, textvariable=self.new_folder_name_var, width=20)
+        self.new_folder_entry.grid(row=0, column=2, sticky=tk.W, padx=8)
+
+        rb2 = ttk.Radiobutton(choice_frame, text="使用既有資料夾", variable=self.folder_mode_var, value="existing", command=self._on_folder_mode_change)
+        rb2.grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
+
+        self.existing_folder_entry = ttk.Entry(choice_frame, textvariable=self.existing_folder_var, width=40)
+        self.existing_folder_entry.grid(row=1, column=1, columnspan=2, sticky=tk.W, padx=8)
+        ttk.Button(choice_frame, text="瀏覽", command=self._browse_existing_folder).grid(row=1, column=3, padx=6)
+
+        self._on_folder_mode_change()
+
         button_row = ttk.Frame(main)
         button_row.pack(fill=tk.X, pady=(0, 10))
         self.start_button = ttk.Button(button_row, text="開始擷取並生成 PLY", command=self.on_start)
@@ -203,6 +227,36 @@ class CaptureApp(tk.Tk):
 
     def _on_interval_change(self, _value=None):
         self._refresh_estimates()
+
+    def _on_folder_mode_change(self):
+        mode = self.folder_mode_var.get()
+        if mode == "new":
+            self.new_folder_entry.config(state=tk.NORMAL)
+            self.existing_folder_entry.config(state=tk.DISABLED)
+        else:
+            self.new_folder_entry.config(state=tk.DISABLED)
+            self.existing_folder_entry.config(state=tk.NORMAL)
+
+    def _browse_existing_folder(self):
+        folder = filedialog.askdirectory(initialdir=str(DEFAULT_SAVE_DIR), title="選擇既有資料夾")
+        if folder:
+            self.existing_folder_var.set(folder)
+
+    def _compute_default_folder_name(self):
+        now = time.localtime()
+        return f"{now.tm_mon}_{now.tm_mday}_{now.tm_hour}_{now.tm_min}"
+
+    def _resolve_save_dir(self) -> Path:
+        # 根據使用者選擇決定儲存資料夾
+        if self.folder_mode_var.get() == "existing":
+            p = Path(self.existing_folder_var.get())
+            return p
+        # new folder -> 在 DEFAULT_SAVE_DIR 下建立
+        name = self.new_folder_name_var.get().strip()
+        if not name:
+            name = self._compute_default_folder_name()
+        p = DEFAULT_SAVE_DIR / name
+        return p
 
     def _refresh_estimates(self):
         interval = float(self.interval_var.get())
@@ -244,8 +298,10 @@ class CaptureApp(tk.Tk):
         interval = float(self.interval_var.get())
         num_photo = calculate_num_photo(interval)
 
+        # 決定儲存路徑（不刪除既有資料）
+        save_dir = self._resolve_save_dir()
         try:
-            ensure_save_dir(DEFAULT_SAVE_DIR)
+            ensure_save_dir(save_dir)
         except Exception as exc:
             messagebox.showerror("儲存路徑錯誤", str(exc))
             return
@@ -259,7 +315,7 @@ class CaptureApp(tk.Tk):
 
         self.capture_thread = threading.Thread(
             target=self._worker,
-            args=(url, interval, num_photo),
+            args=(url, interval, num_photo, save_dir),
             daemon=True,
         )
         self.capture_thread.start()
@@ -270,8 +326,8 @@ class CaptureApp(tk.Tk):
         self.stop_requested = True
         self._append_log("已送出停止請求。")
 
-    def _worker(self, url: str, interval: float, num_photo: int):
-        save_dir = DEFAULT_SAVE_DIR
+    def _worker(self, url: str, interval: float, num_photo: int, save_dir: Path):
+        # save_dir 已由呼叫者解析（不會覆寫既有資料）
         image_format = DEFAULT_IMAGE_FORMAT
         timeout = DEFAULT_TIMEOUT
         max_retries = DEFAULT_MAX_RETRIES
