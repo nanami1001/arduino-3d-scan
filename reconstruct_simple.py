@@ -32,11 +32,19 @@ except:
 # =====================================================
 def load_images(folder="scan_images", num_images=8):
     images = []
+    target_size = None
     for i in range(1, num_images + 1):
         path = Path(folder) / f"{i:02d}.png"
         if path.exists():
             img = cv2.imread(str(path))
             if img is not None:
+                if target_size is None:
+                    h, w = img.shape[:2]
+                    target_size = (w, h)
+                elif img.shape[1] != target_size[0] or img.shape[0] != target_size[1]:
+                    # 所有影像需同尺寸，避免投影索引與 silhouette 寬高不一致
+                    img = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
+                    print(f"⚠ 影像尺寸不一致，已調整為 {target_size[0]}x{target_size[1]}: {path.name}")
                 print(f"✓ 已載入: {path.name}")
                 images.append(img)
             else:
@@ -174,8 +182,10 @@ def voxel_carve(images, grid=40):
 
                     u, v = proj
 
+                    h_i, w_i = silhouettes[i].shape[:2]
+
                     # 二次越界防護
-                    if u < 0 or u >= W or v < 0 or v >= H:
+                    if u < 0 or u >= w_i or v < 0 or v >= h_i:
                         keep = False
                         break
 

@@ -49,6 +49,12 @@ def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8,
     # 確保路徑轉成 Path 物件
     ply_path = Path(ply_path)
 
+    # reconstruct_simple.py 的絕對路徑（避免 cwd 不正確導致找不到檔案）
+    script_path = Path(__file__).parent / 'reconstruct_simple.py'
+    if not script_path.exists():
+        print(f"✗ 找不到重建腳本: {script_path}")
+        return None
+
     # --------------- #
     # (1) 判斷是否需要重建
     # --------------- #
@@ -71,7 +77,7 @@ def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8,
         # --num_images X → 指定影像數量
         cmd = [
             sys.executable,
-            'reconstruct_simple.py',
+            str(script_path),
             '--grid_size', str(grid_size),
             '--num_images', str(num_images)
         ]
@@ -83,8 +89,8 @@ def ensure_ply_exists(ply_path, force_rebuild=False, grid_size=40, num_images=8,
         print(f"執行命令: {' '.join(cmd)}")
 
         # 執行外部程式（阻塞直到程式結束）
-        # check=True → 若 reconstruct_simple.py 回傳非 0，會直接丟例外
-        subprocess.run(cmd, check=True)
+        # 指定 cwd 為腳本所在資料夾，避免相對路徑問題
+        subprocess.run(cmd, check=True, cwd=str(script_path.parent))
 
         # --------------- #
         # (3) 重建完成後再次檢查 PLY 是否真的生成
