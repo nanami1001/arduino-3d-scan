@@ -706,7 +706,7 @@ class MainUI:
                             color="black", linewidth=0.25, alpha=0.8
                         )
 
-                    self.log_insert(f"✓ ConvexHull：{len(hull.simplices)} 三角形")
+                    self.log_insert(f"✓ ConvexHull：{len(hull.simplices)} ")
                 else:
                     self.ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c="blue", s=2)
 
