@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 主控 UI：整合重建、檢視、檢查清單與匯出功能
 
@@ -156,16 +156,28 @@ class MainUI:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=8, pady=6)
 
-        # Tab 1 — 3D 重建
+        # Tab: 操作選擇（Operation selection）
+        self.tab_ops = ttk.Frame(self.notebook)
+        # add ops tab
+        self.notebook.add(self.tab_ops, text="🔧 操作選擇")
+        # create mode panel inside ops tab
+        self._create_mode_panel(parent=self.tab_ops)
+
+        # 指導手冊 Tab（整合硬體 / 軟體教學）
+        self.tab_manual = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_manual, text="指導手冊")
+        self._create_manual_tab()
+
+        # Tab 3 — 3D 重建（初始鎖定，需由 操作選擇 解鎖）
         self.tab_rebuild = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_rebuild, text="📊 3D 重建")
         self._create_rebuild_tab()
 
-        # Tab 2 — 檢查清單
-        # (Checklist removed per new requirements)
-
-        # 啟動時顯示模式選擇（延後到主迴圈以確保視窗已初始化）
-        self.root.after(100, self.show_mode_selection)
+        # 預設停用 3D 重構分頁，等待使用者在 操作選擇 完成設定後解鎖
+        try:
+            self.notebook.tab(self.tab_rebuild, state="disabled")
+        except Exception:
+            pass
 
     # ============================================================
     #  Tab 1 — 3D 重建（參數、按鈕、3D 顯示、日誌）
@@ -274,32 +286,26 @@ class MainUI:
             self.log_insert("⚠ 正在建立中，請稍候...")
             return
 
+        # 選擇來源資料夾（含影像）
+        images_folder = filedialog.askdirectory(
+            initialdir=str(Path("scan_images")),
+            title="選擇包含影像的資料夾"
+        )
+        if not images_folder:
+            self.log_insert("✗ 使用者取消資料夾選擇")
+            return
+
         grid = self.grid_size_var.get()
         num_images = self.num_images_var.get()
         force = self.force_rebuild_var.get()
 
-        self.log_insert(f"開始重建（Grid={grid}, Images={num_images}, Force={force})...")
+        self.log_insert(f"開始重建：{images_folder}（Grid={grid}, Images={num_images}）...")
         self.is_building = True
         self.rebuild_btn.config(state="disabled")
 
-        # 更新狀態：體素雕刻開始
-        self.log_insert("⟳ 正在執行 Visual Hull 演算法...")
-
-        # -------------------------
-        # 背景執行
-        # -------------------------
-
-        # 選擇來源資料夾（dataset）
-        images_folder = self._ask_dataset_folder()
-        if images_folder is None:
-            self.log_insert("✗ 使用者取消資料夾選擇，重建中止")
-            self.is_building = False
-            self.rebuild_btn.config(state="normal")
-            return
-
         def worker():
             try:
-                # 將輸出 PLY 放在選擇的資料夾內
+                # PLY 輸出至同資料夾
                 out_ply = Path(images_folder) / "result_visual_hull.ply"
                 ply_path = ensure_ply_exists(
                     str(out_ply),
@@ -324,12 +330,6 @@ class MainUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _ask_dataset_folder(self):
-        folder = filedialog.askdirectory(initialdir=str(Path("scan_images")), title="選擇資料夾作為資料來源")
-        if not folder:
-            return None
-        return folder
-
     # ============================================================
     #  重建完成後 → 載入 PLY
     # ============================================================
@@ -346,47 +346,18 @@ class MainUI:
     # ============================================================
 
     def on_view(self):
-        # 選擇來源資料夾（dataset）後載入或重建其 PLY
-        folder = filedialog.askdirectory(initialdir=str(Path("scan_images")), title="選擇資料夾作為資料來源")
-        if not folder:
-            self.log_insert("✗ 使用者取消資料夾選擇")
+        # 直接選擇單一 .ply 檔案
+        path = filedialog.askopenfilename(
+            initialdir=str(Path("scan_images")),
+            title="選擇 PLY 檔案",
+            filetypes=[("PLY files", "*.ply"), ("All files", "*.*")]
+        )
+
+        if not path:
+            self.log_insert("✗ 使用者取消選擇")
             return
 
-        ply_path = Path(folder) / "result_visual_hull.ply"
-        if ply_path.exists():
-            self.load_and_display_ply(str(ply_path))
-            return
-
-        resp = messagebox.askyesno("找不到 PLY", f"在所選資料夾未找到 PLY：{ply_path}\n是否要基於該資料夾立即建立 PLY？")
-        if resp:
-            # 啟動重建流程，使用該資料夾作為來源
-            self.log_insert(f"開始為資料夾建立 PLY：{folder}")
-            self.is_building = True
-            self.rebuild_btn.config(state="disabled")
-
-            def worker_build():
-                try:
-                    result = ensure_ply_exists(
-                        str(ply_path),
-                        force_rebuild=False,
-                        grid_size=self.grid_size_var.get(),
-                        num_images=self.num_images_var.get(),
-                        no_display=True,
-                        images_folder=folder,
-                    )
-
-                    if result:
-                        self.root.after(50, lambda: self.load_and_display_ply(str(result)))
-                    else:
-                        self.root.after(50, lambda: self.log_insert("✗ PLY 建立失敗"))
-
-                finally:
-                    self.is_building = False
-                    self.root.after(50, lambda: self.rebuild_btn.config(state="normal"))
-
-            threading.Thread(target=worker_build, daemon=True).start()
-        else:
-            self.log_insert("✗ 使用者取消")
+        self.load_and_display_ply(path)
 
     # ============================================================
     #  載入 + 顯示 PLY（含自動重建 fallback）
@@ -507,72 +478,105 @@ class MainUI:
         ax.set_zlim3d(mid[2] - r, mid[2] + r)
 
     # ============================================================
-    #  啟動模式選擇與流程控制
+    #  操作選擇面板（一體化 UI）
     # ============================================================
 
-    def show_mode_selection(self):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("選擇操作模式")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("420x160")
+    def _create_mode_panel(self, parent=None):
+        """在指定 parent 頁面建立操作選擇面板（默認為 tab_rebuild）。"""
+        if parent is None:
+            parent = self.tab_rebuild
+        panel = ttk.LabelFrame(parent, text="操作選擇", padding=10)
 
-        ttk.Label(dlg, text="請選擇系統操作模式：", font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 6))
-        ttk.Label(dlg, text="A. 使用現有樣本產生 3D 影像（直接進入預覽模式）\nB. 使用影像採集設備從頭開始（清空資料並啟動採集）",
-                  foreground=COLOR_LIGHT_TEXT).pack(anchor=tk.W, padx=12)
+        # 將說明置頂，按鈕上下排列且放大
+        panel.pack(fill=tk.X, padx=8, pady=(8, 6))
 
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=12)
+        info_label = ttk.Label(panel, text="選擇模式後，系統將進入相應流程。", foreground=COLOR_LIGHT_TEXT, anchor="w")
+        info_label.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(0, 8))
 
-        ttk.Button(btn_frame, text="A: 使用現有樣本", command=lambda: (dlg.destroy(), self._mode_a())).pack(side=tk.LEFT, padx=12)
-        ttk.Button(btn_frame, text="B: 從影像採集開始", command=lambda: (dlg.destroy(), self._mode_b())).pack(side=tk.RIGHT, padx=12)
+        # 模式變數與選擇處理
+        self.mode_var = tk.StringVar(value="preview")
 
-    def _mode_a(self):
-        self.log_insert("模式 A：使用現有樣本 → 直接進入預覽模式")
+        def update_button_styles():
+            # 簡單視覺回饋：使用 state pressed 清楚顯示選取
+            if getattr(self, '_btn_preview', None):
+                try:
+                    if self.mode_var.get() == 'preview':
+                        self._btn_preview.state(['pressed'])
+                    else:
+                        self._btn_preview.state(['!pressed'])
+                except Exception:
+                    pass
+            if getattr(self, '_btn_capture', None):
+                try:
+                    if self.mode_var.get() == 'capture':
+                        self._btn_capture.state(['pressed'])
+                    else:
+                        self._btn_capture.state(['!pressed'])
+                except Exception:
+                    pass
 
-    def _mode_b(self):
-        self.log_insert("模式 B：從影像採集設備開始（保留既有資料）")
+        def on_select_preview():
+            self.mode_var.set('preview')
+            update_button_styles()
 
-        ok = self._hardware_check_dialog()
-        if not ok:
-            self.log_insert("✗ 使用者取消硬體檢查")
-            return
+        def on_select_capture():
+            self.mode_var.set('capture')
+            update_button_styles()
 
-        self.log_insert("啟動 ESP32-CAM 採集器（獨立視窗）。採集資料將儲存在使用者選擇或建立的新資料夾中。")
+        # 大按鈕（上下排列）作為選擇控制：不直接執行動作，改為設定模式
+        self._btn_preview = ttk.Button(panel, text="📸 使用現有樣本產生 3D 影像", command=on_select_preview)
+        self._btn_preview.pack(fill=tk.X, padx=12, pady=(6, 8))
         try:
-            script = Path("esp32_cam_capture.py").resolve()
-            subprocess.Popen([sys.executable, str(script)])
-        except Exception as e:
-            messagebox.showerror("啟動失敗", f"無法啟動 esp32_cam_capture：{e}")
-            return
+            self._btn_preview.config(font=("Arial", 12))
+        except Exception:
+            pass
 
-        threading.Thread(target=self._monitor_capture_completion, daemon=True).start()
+        self._btn_capture = ttk.Button(panel, text="🎬 使用影像採集設備從頭開始", command=on_select_capture)
+        self._btn_capture.pack(fill=tk.X, padx=12, pady=(0, 6))
+        try:
+            self._btn_capture.config(font=("Arial", 12))
+        except Exception:
+            pass
 
-    def _clear_scan_images(self):
-        folder = Path("scan_images")
-        if not folder.exists():
-            folder.mkdir(parents=True, exist_ok=True)
-            return
-
-        for p in folder.iterdir():
+        # Start / Confirm 按鈕：解鎖並切換至 3D 重構分頁
+        def on_confirm():
+            mode = self.mode_var.get()
+            self.log_insert(f"▶ 已選擇模式：{mode}")
             try:
-                if p.is_file():
-                    p.unlink()
-                elif p.is_dir():
-                    import shutil
-                    shutil.rmtree(p)
+                self.notebook.tab(self.tab_rebuild, state='normal')
+                idx = self.notebook.index(self.tab_rebuild)
+                self.notebook.select(idx)
+                self.log_insert("✓ 3D 重構頁面已解鎖並切換")
             except Exception as e:
-                raise RuntimeError(f"刪除 {p} 失敗：{e}") from e
+                self.log_insert(f"✗ 解鎖或切換失敗：{e}")
 
-    def _hardware_check_dialog(self) -> bool:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("硬體檢查")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("520x260")
+            if mode == 'preview':
+                self._start_preview_mode()
+            else:
+                self._start_capture_mode()
 
-        ttk.Label(dlg, text="請確認以下硬體與連線已完成：", font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 6))
+            try:
+                start_btn.config(state='disabled')
+            except Exception:
+                pass
 
+        start_btn = ttk.Button(panel, text="開始", command=on_confirm)
+        start_btn.pack(fill=tk.X, padx=12, pady=(8, 6))
+
+        sep = ttk.Separator(panel, orient=tk.HORIZONTAL)
+        sep.pack(fill=tk.X, pady=6)
+
+        update_button_styles()
+
+    def _start_preview_mode(self):
+        self.log_insert("▶ 模式：使用現有樣本產生 3D 影像")
+        self.log_insert("請使用【重建】或【載入並顯示】按鈕選擇資料並產生預覽。")
+
+    def _start_capture_mode(self):
+        self.log_insert("▶ 模式：使用影像採集設備從頭開始")
+        self.log_insert("✓ 保留既有資料（不清除 scan_images）")
+
+        # 硬體檢查（內建於面板下方顯示）
         checks = [
             "ESP32-CAM 已正確安裝並固定",
             "電源與網路連線已接好",
@@ -580,44 +584,185 @@ class MainUI:
             "相機視角與對位已確認",
         ]
 
-        for c in checks:
-            ttk.Label(dlg, text=f"• {c}", foreground=COLOR_TEXT).pack(anchor=tk.W, padx=18, pady=4)
+        msg = "\n".join(checks)
+        resp = messagebox.showinfo(
+            "硬體檢查",
+            f"請確認以下硬體與連線已完成：\n\n{msg}\n\n按 OK 確認並繼續。"
+        )
 
-        result = {"ok": False}
+        self.log_insert("✓ 硬體檢查確認")
+        self.log_insert("啟動 ESP32-CAM 採集器（獨立視窗）...")
 
-        def on_ok():
-            result["ok"] = True
-            dlg.destroy()
+        try:
+            script = Path("esp32_cam_capture.py").resolve()
+            subprocess.Popen([sys.executable, str(script)])
+        except Exception as e:
+            self.log_insert(f"✗ 無法啟動採集器：{e}")
+            messagebox.showerror("啟動失敗", f"無法啟動 esp32_cam_capture：{e}")
+            return
 
-        def on_cancel():
-            dlg.destroy()
-
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=12)
-        ttk.Button(btn_frame, text="我已完成硬體檢查", command=on_ok).pack(side=tk.LEFT, padx=12)
-        ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.RIGHT, padx=12)
-
-        self.root.wait_window(dlg)
-        return result["ok"]
+        self.log_insert("開始監控採集結果（等待任一子資料夾下的 result_visual_hull.ply）...")
+        threading.Thread(target=self._monitor_capture_completion, daemon=True).start()
 
     def _monitor_capture_completion(self):
-        self.log_insert("開始監控採集結果（等待任一子資料夾下的 result_visual_hull.ply）...")
         timeout = 60 * 30  # 最多等待 30 分鐘
         start = time.time()
         while time.time() - start < timeout:
             for p in Path('.').rglob('result_visual_hull.ply'):
                 try:
                     if p.exists() and p.stat().st_size > 0:
-                        self.root.after(50, lambda p=p: self.log_insert(f"✓ 偵測到 PLY：{p}，導入預覽模式"))
-                        self.root.after(100, lambda: self.notebook.select(self.tab_rebuild))
-                        self.root.after(150, lambda p=p: self.load_and_display_ply(str(p)))
+                        self.root.after(50, lambda p=p: self.log_insert(f"✓ 偵測到 PLY：{p}"))
+                        self.root.after(100, lambda p=p: self.load_and_display_ply(str(p)))
                         return
                 except Exception:
                     continue
 
             time.sleep(2)
 
+    def _create_manual_tab(self):
+        """建立指導手冊頁籤：支援圖片、可滾動說明與程式碼顯示"""
+        # 使用子 Notebook 區分硬體 / 軟體教學
+        manual_nb = ttk.Notebook(self.tab_manual)
+        manual_nb.pack(fill="both", expand=True, padx=8, pady=6)
+
+        hw_frame = ttk.Frame(manual_nb)
+        sw_frame = ttk.Frame(manual_nb)
+        manual_nb.add(hw_frame, text="硬體教學")
+        manual_nb.add(sw_frame, text="軟體教學")
+
+        # --- 硬體教學子頁 ---
+        hw_sub_nb = ttk.Notebook(hw_frame)
+        hw_sub_nb.pack(fill="both", expand=True)
+
+        wiring_page = ttk.Frame(hw_sub_nb)
+        arduino_page = ttk.Frame(hw_sub_nb)
+        esp_page = ttk.Frame(hw_sub_nb)
+        hw_sub_nb.add(wiring_page, text="接線圖 / 照片")
+        hw_sub_nb.add(arduino_page, text="Arduino 程式碼")
+        hw_sub_nb.add(esp_page, text="ESP32-CAM 程式碼")
+
+        from tkinter.scrolledtext import ScrolledText
+
+        # 接線圖 / 照片（可內嵌顯示或以系統預設程式開啟）
+        img_frame = ttk.Frame(wiring_page)
+        img_frame.pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        assets = [
+            Path("assets/manual/28byj48_wiring.png"),
+            Path("assets/manual/esp32cam_flash_mode.png"),
+        ]
+
+        displayed_any = False
+        try:
+            from PIL import Image, ImageTk
+            pil_ok = True
+        except Exception:
+            pil_ok = False
+
+        def open_asset(path: Path):
+            try:
+                os.startfile(str(path))
+            except Exception as exc:
+                messagebox.showerror("無法開啟圖片", f"無法開啟 {path.name}\n{exc}")
+
+        asset_titles = {
+            "28byj48_wiring.png": "28BYJ-48 接線圖",
+            "esp32cam_flash_mode.png": "ESP32-CAM 燒錄模式接線圖",
+        }
+
+        for p in assets:
+            if p.exists():
+                displayed_any = True
+                card = ttk.Frame(img_frame)
+                card.pack(side=tk.LEFT, padx=8, pady=4)
+
+                title = ttk.Label(card, text=asset_titles.get(p.name, p.stem), foreground=COLOR_TEXT)
+                title.pack(anchor=tk.W, pady=(0, 4))
+
+                if pil_ok:
+                    try:
+                        img = Image.open(p)
+                        img.thumbnail((360, 240))
+                        tkimg = ImageTk.PhotoImage(img)
+                        lbl = ttk.Label(card, image=tkimg, cursor="hand2")
+                        lbl.image = tkimg
+                        lbl.pack()
+                        lbl.bind("<Button-1>", lambda e, p=p: open_asset(p))
+                    except Exception:
+                        btn = ttk.Button(card, text=f"開啟 {p.name}", command=lambda p=p: open_asset(p))
+                        btn.pack(side=tk.LEFT, padx=6)
+                else:
+                    # Pillow not available — 提供開啟按鈕
+                    btn = ttk.Button(card, text=f"開啟 {p.name}", command=lambda p=p: open_asset(p))
+                    btn.pack()
+
+        if not displayed_any:
+            note = ttk.Label(img_frame, text="尚未加入接線圖。請將影像放置於 assets/manual/ 並重新啟動 UI。")
+            note.pack(anchor=tk.W, padx=6)
+
+        # 接線說明文字區
+        wiring_txt = ScrolledText(wiring_page, wrap="word")
+        wiring_txt.pack(fill="both", expand=True)
+        wiring_msg = (
+            "接線圖與實體照片放置於：\n"
+            "  assets/manual/28byj48_wiring.png\n"
+            "  assets/manual/esp32cam_flash_mode.png\n\n"
+        )
+        wiring_txt.insert("1.0", wiring_msg)
+        wiring_txt.bind('<Key>', lambda e: 'break')
+
+        # Arduino 程式碼顯示
+        arduino_txt = ScrolledText(arduino_page, wrap="none")
+        arduino_txt.pack(fill="both", expand=True)
+        arduino_code_path = Path("Arduino hardware programming program/28BYJ48_test/28BYJ48_test.ino")
+        try:
+            with open(arduino_code_path, "r", encoding="utf-8") as f:
+                arduino_txt.insert("1.0", f.read())
+        except Exception as e:
+            arduino_txt.insert("1.0", f"無法載入 Arduino 程式：{e}")
+        arduino_txt.bind('<Key>', lambda e: 'break')
+
+        # ESP32 程式碼顯示（若有）
+        esp_txt = ScrolledText(esp_page, wrap="none")
+        esp_txt.pack(fill="both", expand=True)
+        esp_code_path = Path("Arduino hardware programming program/ESP32_CAM/example_camera.ino")
+        if esp_code_path.exists():
+            try:
+                with open(esp_code_path, "r", encoding="utf-8") as f:
+                    esp_txt.insert("1.0", f.read())
+            except Exception as e:
+                esp_txt.insert("1.0", f"無法載入 ESP32 程式：{e}")
+        else:
+            esp_txt.insert("1.0", "尚未加入 ESP32 範例程式，請將檔案放置於 Arduino hardware programming program/ESP32_CAM/ 目錄。")
+        esp_txt.bind('<Key>', lambda e: 'break')
+
+        # --- 軟體教學子頁 ---
+        sw_sub_nb = ttk.Notebook(sw_frame)
+        sw_sub_nb.pack(fill="both", expand=True)
+
+        sys_page = ttk.Frame(sw_sub_nb)
+        ui_page = ttk.Frame(sw_sub_nb)
+        sw_sub_nb.add(sys_page, text="系統操作")
+        sw_sub_nb.add(ui_page, text="介面功能")
+
+        sys_txt = ScrolledText(sys_page, wrap="word")
+        sys_txt.pack(fill="both", expand=True)
+        # 載入手冊摘要
+        manual_md = Path("md/GUIDE_HARDWARE_SOFTWARE.md")
+        try:
+            with open(manual_md, "r", encoding="utf-8") as f:
+                sys_txt.insert("1.0", f.read())
+        except Exception as e:
+            sys_txt.insert("1.0", f"無法載入手冊：{e}")
+        sys_txt.bind('<Key>', lambda e: 'break')
+
+        ui_txt = ScrolledText(ui_page, wrap="word")
+        ui_txt.pack(fill="both", expand=True)
+        ui_txt.insert("1.0", "介面說明：\n- 使用 main_ui.py 的 Notebook 切換頁面\n- 在 3D 重建頁面可進行重建、載入 PLY 與啟動採集器")
+
+
         self.root.after(50, lambda: self.log_insert("⚠ 監控逾時，未偵測到 PLY。"))
+    # ============================================================
     #  開啟資料夾
     # ============================================================
 
@@ -639,3 +784,4 @@ if __name__ == "__main__":
     root.geometry("900x800")
     app = MainUI(root)
     root.mainloop()
+
