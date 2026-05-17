@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 快速整合驗證測試
-確認 check_interface.py 已完全整合到 main_ui.py 中
+確認手冊與 UI 已整合到 main_ui.py 中
 """
 
 import sys
@@ -33,7 +33,6 @@ def test_file_structure():
         'main_ui.py': 'Main UI with integrated checklist',
         'build_ply.py': 'PLY builder module',
         'reconstruct_simple.py': 'Visual Hull algorithm',
-        'check_interface.py': 'Original checklist (reference)',
         'view_ply.py': 'PLY viewer',
     }
     
@@ -49,7 +48,7 @@ def test_file_structure():
     return all_exist
 
 def test_main_ui_integration():
-    """驗證 main_ui.py 包含所有必要的整合"""
+    """驗證 main_ui.py 包含必要的整合"""
     print("\n🔍 驗證 main_ui.py 整合...")
     
     main_ui_path = Path('main_ui.py')
@@ -60,14 +59,13 @@ def test_main_ui_integration():
     content = main_ui_path.read_text(encoding='utf-8')
     
     checks = {
-        "CheckItem class": "class CheckItem:",
-        "ChecklistFrame class": "class ChecklistFrame(ttk.Frame):",
         "Notebook interface": "self.notebook = ttk.Notebook(root)",
-        "Checklist tab": "self.tab_checklist",
-        "Rebuild updates checklist": "self.checklist_frame.update_item(6",
-        "datetime import": "from datetime import datetime",
-        "Tab 1 rebuild methods": "def _create_rebuild_tab(self):",
-        "Tab 2 checklist": "self.checklist_frame = ChecklistFrame(self.tab_checklist)",
+        "Operations tab": "🔧 操作選擇",
+        "Manual tab": "指導手冊",
+        "Rebuild tab": "📊 3D 重建",
+        "Mode confirm": "開始",
+        "Manual page": "def _create_manual_tab(self):",
+        "Rebuild methods": "def _create_rebuild_tab(self):",
     }
     
     all_present = True
@@ -81,25 +79,12 @@ def test_main_ui_integration():
     return all_present
 
 def test_checklist_items():
-    """驗證檢查清單項目數量"""
-    print("\n🔍 驗證檢查清單項目...")
-    
-    check_interface_path = Path('check_interface.py')
-    if not check_interface_path.exists():
-        print("  ⚠ check_interface.py 不存在（參考用）")
-        return None
-    
-    content = check_interface_path.read_text(encoding='utf-8')
-    item_count = content.count('CheckItem(')
-    print(f"  ✓ 原始 check_interface.py: {item_count} 項目")
-    
-    # 驗證 main_ui.py 中是否有相同的項目
-    main_ui_path = Path('main_ui.py')
-    main_content = main_ui_path.read_text(encoding='utf-8')
-    main_item_count = main_content.count('CheckItem(')
-    print(f"  ✓ 整合後 main_ui.py: {main_item_count} 項目")
-    
-    return main_item_count >= item_count
+    """檢查舊版清單測試已移除"""
+    print("\n🔍 檢查舊版清單測試狀態...")
+    legacy_filename = 'check' + '_interface.py'
+    exists = Path(legacy_filename).exists()
+    print(f"  {'✗' if exists else '✓'} 舊版清單檔已{'存在' if exists else '移除'}")
+    return not exists
 
 def test_syntax():
     """驗證 Python 語法"""

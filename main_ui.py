@@ -747,18 +747,49 @@ class MainUI:
 
         sys_txt = ScrolledText(sys_page, wrap="word")
         sys_txt.pack(fill="both", expand=True)
-        # 載入手冊摘要
-        manual_md = Path("md/GUIDE_HARDWARE_SOFTWARE.md")
-        try:
-            with open(manual_md, "r", encoding="utf-8") as f:
-                sys_txt.insert("1.0", f.read())
-        except Exception as e:
-            sys_txt.insert("1.0", f"無法載入手冊：{e}")
+        # 優先載入 md/main_ui.md（含系統操作與介面功能），若不存在則回退至 GUIDE_HARDWARE_SOFTWARE.md
+        manual_primary = Path("md/main_ui.md")
+        manual_fallback = Path("md/GUIDE_HARDWARE_SOFTWARE.md")
+        loaded_text = None
+        if manual_primary.exists():
+            try:
+                loaded_text = manual_primary.read_text(encoding='utf-8')
+                sys_txt.insert("1.0", loaded_text)
+            except Exception as e:
+                sys_txt.insert("1.0", f"無法載入 {manual_primary}: {e}")
+        elif manual_fallback.exists():
+            try:
+                loaded_text = manual_fallback.read_text(encoding='utf-8')
+                sys_txt.insert("1.0", loaded_text)
+            except Exception as e:
+                sys_txt.insert("1.0", f"無法載入 {manual_fallback}: {e}")
+        else:
+            sys_txt.insert("1.0", "尚未加入手冊檔案 (md/main_ui.md 或 md/GUIDE_HARDWARE_SOFTWARE.md)")
         sys_txt.bind('<Key>', lambda e: 'break')
 
         ui_txt = ScrolledText(ui_page, wrap="word")
         ui_txt.pack(fill="both", expand=True)
-        ui_txt.insert("1.0", "介面說明：\n- 使用 main_ui.py 的 Notebook 切換頁面\n- 在 3D 重建頁面可進行重建、載入 PLY 與啟動採集器")
+        # 如果已載入完整手冊文字，嘗試抽出「介面功能」章節顯示，否則顯示簡短說明
+        if loaded_text:
+            try:
+                start_mark = '## 指導手冊 — 軟體教學 — 介面功能'
+                idx = loaded_text.find(start_mark)
+                if idx != -1:
+                    # 往後尋找下一個章節標頭或結尾
+                    rest = loaded_text[idx+len(start_mark):]
+                    next_idx = rest.find('\n## ')
+                    if next_idx != -1:
+                        section = rest[:next_idx].strip()
+                    else:
+                        section = rest.strip()
+                    ui_txt.insert("1.0", start_mark + "\n" + section)
+                else:
+                    # 無該章節，顯示整份手冊摘要的前段
+                    ui_txt.insert("1.0", loaded_text[:400])
+            except Exception:
+                ui_txt.insert("1.0", "介面說明：\n- 使用 main_ui.py 的 Notebook 切換頁面\n- 在 3D 重建頁面可進行重建、載入 PLY 與啟動採集器")
+        else:
+            ui_txt.insert("1.0", "介面說明：\n- 使用 main_ui.py 的 Notebook 切換頁面\n- 在 3D 重建頁面可進行重建、載入 PLY 與啟動採集器")
 
 
         self.root.after(50, lambda: self.log_insert("⚠ 監控逾時，未偵測到 PLY。"))
